@@ -87,64 +87,54 @@ if train_file and test_file:
     X_test  = feat_test.values.astype(np.float32)
 
     # ════════════════════════════════
-# 1차 필터링
-# ════════════════════════════════
-st.markdown("---")
-st.subheader("🔵 1차 필터링")
+    # 1차 필터링
+    # ════════════════════════════════
+    st.markdown("---")
+    st.subheader("🔵 1차 필터링")
 
-with st.spinner("1차 필터링 실행 중..."):
-    # 3대 핵심 센서 임계값
-    T_65  = 34.79
-    T_205 = 13.43
-    T_510 = 60.84
+    with st.spinner("1차 필터링 실행 중..."):
+        imputer  = SimpleImputer(strategy='median')
+        X_tr_imp = imputer.fit_transform(X_train)
+        X_te_imp = imputer.transform(X_test)
+        scaler1  = StandardScaler()
+        X_tr_sc  = scaler1.fit_transform(X_tr_imp)
+        X_te_sc  = scaler1.transform(X_te_imp)
 
-    # 숫자 강제 변환
-    feat_test_1st = feat_test.copy()
-    for col in ['65', '205', '510']:
-        if col in feat_test_1st.columns:
-            feat_test_1st[col] = pd.to_numeric(feat_test_1st[col], errors='coerce')
+        iso = IsolationForest(n_estimators=200, contamination=0.066, random_state=SEED)
+        iso.fit(X_tr_sc)
+        iso_tr = -iso.score_samples(X_tr_sc)
+        iso_te = -iso.score_samples(X_te_sc)
+        iso_tr = (iso_tr - iso_tr.min()) / (iso_tr.max() - iso_tr.min())
+        iso_te = (iso_te - iso_te.min()) / (iso_tr.max() - iso_tr.min() + 1e-8)
 
-    # AND 조건 판별
-    has_cols = all(c in feat_test_1st.columns for c in ['65', '205', '510'])
-    if not has_cols:
-        st.error("진단 데이터에 '65', '205', '510' 컬럼이 없습니다.")
-        st.stop()
+        pca1 = PCA(n_components=0.95, random_state=SEED)
+        pca1.fit(X_tr_sc[y_train_all == 0])
+        recon_tr = np.mean((X_tr_sc - pca1.inverse_transform(pca1.transform(X_tr_sc)))**2, axis=1)
+        recon_te = np.mean((X_te_sc - pca1.inverse_transform(pca1.transform(X_te_sc)))**2, axis=1)
+        pca_tr = (recon_tr - recon_tr.min()) / (recon_tr.max() - recon_tr.min())
+        pca_te = (recon_te - recon_te.min()) / (recon_tr.max() - recon_tr.min() + 1e-8)
 
-    condition = (
-        (feat_test_1st['65']  >= T_65)  &
-        (feat_test_1st['205'] >= T_205) &
-        (feat_test_1st['510'] >= T_510)
-    )
-    pred1 = condition.values
+        X_tr_1st = np.hstack([X_tr_sc, iso_tr.reshape(-1,1), pca_tr.reshape(-1,1)])
+        X_te_1st = np.hstack([X_te_sc, iso_te.reshape(-1,1), pca_te.reshape(-1,1)])
 
-    # 불량 원인 텍스트 생성
-    def make_reason(row):
-        return (
-            f"🚨 [3대 핵심센서 동시초과] "
-            f"챔버온도(65번): {row['65']:.1f} (기준:{T_65}) | "
-            f"가스압력(205번): {row['205']:.1f} (기준:{T_205}) | "
-            f"배기펌프(510번): {row['510']:.1f} (기준:{T_510})"
-        )
+        rf1  = RandomForestClassifier(n_estimators=300, max_depth=12, min_samples_leaf=1,
+                                      class_weight={0:1, 1:10}, random_state=SEED, n_jobs=-1)
+        skf  = StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
+        prob1_train = cross_val_predict(rf1, X_tr_1st, y_train_all, cv=skf, method='predict_proba')[:,1]
+        rf1.fit(X_tr_1st, y_train_all)
+        prob1 = rf1.predict_proba(X_te_1st)[:,1]
+        THRESHOLD_1ST = 0.10
+        pred1 = prob1 >= THRESHOLD_1ST
 
-    reasons = []
-    for i, row in feat_test_1st.iterrows():
-        if condition.loc[i]:
-            reasons.append(make_reason(row))
-        else:
-            reasons.append("이상 없음")
+    # 불량 탐지 수만 표시
+    n_suspect1 = pred1.sum()
+    st.metric("🚨 1차 불량 의심 샘플", f"{n_suspect1}개")
 
-# 결과 표시
-n_suspect1 = pred1.sum()
-st.metric("🚨 1차 불량 의심 샘플", f"{n_suspect1}개")
-
-st.dataframe(pd.DataFrame({
-    "샘플 번호":   range(len(pred1)),
-    "1차 판정":    ["🚨 1차 불량 (확인요망)" if p else "✅ 정상 통과" for p in pred1],
-    "불량 상세원인": reasons
-}), use_container_width=True)
-
-# 2차 필터링에서 prob1 변수가 필요하므로 대체값 생성
-prob1 = pred1.astype(float)
+    st.dataframe(pd.DataFrame({
+        "샘플 번호": range(len(prob1)),
+        "1차 위험 점수": prob1.round(4),
+        "1차 판정": ["🚨 의심" if p else "✅ 통과" for p in pred1]
+    }), use_container_width=True)
 
     # ════════════════════════════════
     # 2차 필터링
