@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+h5py
+scipy
+scikit-learn
+lightgbm
+openpyxl
